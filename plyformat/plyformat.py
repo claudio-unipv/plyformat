@@ -59,9 +59,7 @@ _TYPE_MAP = [
     (np.uint16, b"ushort"),
     (np.int16, b"short"),
     (np.uint32, b"uint"),
-    (np.int32, b"int"),
-    (np.uint64, b"uint"),
-    (np.int64, b"int")
+    (np.int32, b"int")
 ]
 
 
@@ -80,6 +78,10 @@ _STRUCT_MAP = {
 
 def _ply_type(dtype):
     """Return the corresponding PLY type, or None."""
+    if np.issubdtype(dtype, np.int64):
+        dtype = np.int32
+    elif np.issubdtype(dtype, np.uint64):
+        dtype = np.uint32
     for dt, typename in _TYPE_MAP:
         if np.issubdtype(dtype, dt):
             return typename
@@ -269,6 +271,119 @@ def write_ply(filename, vertices, faces, other_elements=None,
         _write_ply_handle(f, elements, comments, binary, big_endian)
 
 
+def _read_header_line(f):
+    """Read a line from the header, ignoring comments."""
+    while True:
+        line = f.readline()
+        if line is None:
+            raise PLYError("Invalid PLY file (unexpected EOF in header)")
+        line = line.strip()
+        if len(line) > 0 and not line.startswith(b"comment "):
+            return line
+
+
+def _read_header_intro(f):
+    line = _read_header_line(f)
+    if line != b"ply":
+        raise PLYError(f"Invalid PLY file (unexpected magic number '{line.hex()}')")
+    line = _read_header_line(f)
+    fmt = line.split()
+    if len(fmt) != 3 or fmt[0] != b"format":
+        line = line.decode("ascii")
+        raise PLYError(f"Invalid PLY file (invalid format '{line}')")
+    if fmt[1] == b"ascii":
+        return False, True
+    elif fmt[1] == b"binary_little_endian":
+        return True, False
+    elif fmt[1] == b"binary_big_endian":
+        return True, True
+    else:
+        line = fmt[1].decode("ascii")
+        raise PLYError(f"Invalid PLY file (invalid format '{line}')")
+
+
+def _isvalidid(b):
+    return b.decode("ascii").isidentifier()
+
+
+def _read_header_definitions(f):
+    name = None
+    type_ = None
+    size = None
+    elements = collections.OrderedDict()
+    list_types = {}
+    types = {ply: dt for dt, ply in _TYPE_MAP}
+    while True:
+        line = _read_header_line(f)
+        tokens = line.split()
+        if tokens[0] == b"property":
+            if type_ is None:
+                raise PLYError(f"Invalid PLY file (unexpected property)")
+            if len(tokens) == 3 and tokens[1] in types and _isvalidid(tokens[2]):
+                # Store scalar type.
+                type_.append((tokens[2].decode("ascii"), types[tokens[1]]))
+            elif (len(tokens) == 5 and tokens[1] == b"list" and
+                  tokens[2] in types and tokens[3] in types and _isvalidid(tokens[4])):
+                propname = tokens[4].decode("ascii")
+                type_.append((propname, np.object_))
+                list_types[name][propname] = (types[tokens[2]], types[tokens[3]])
+            else:
+                breakpoint()
+                raise PLYError(f"Invalid PLY file (invalid element '{line}')")
+            continue
+        if name is not None:
+            # Store the current element.
+            elements[name] = np.empty((size,), dtype=type_)
+        if line == b"end_header":
+            break
+        if tokens[0] == b"element":
+            if len(tokens) != 3 or not _isvalidid(tokens[1]) or not tokens[2].isdigit():
+                raise PLYError(f"Invalid PLY file (invalid element '{line}')")
+            name = tokens[1].decode("ascii")
+            type_ = []
+            size = int(tokens[2])
+            list_types[name] = {}
+        else:
+            line = line.decode("ascii")
+            raise PLYError(f"Invalid PLY file (invalid header line '{line}')")
+    return elements, list_types
+
+
+def _read_ply_element_binary(f, element, list_types, big_endian):
+    pass
+
+
+def _read_ply_element_ascii(f, element, list_types):
+    pass
+
+
+def _read_ply_handle(f):
+    # Read the header.
+    binary, big_endian = _read_header_intro(f)
+    elements, list_types = _read_header_definitions(f)
+    # Read the elements.
+    for name, element in elements.items():
+        if binary:
+            _read_ply_element_binary(f, element, list_types[name], big_endian)
+        else:
+            _read_ply_element_ascii(f, element, list_types[name])
+    print(elements)
+    print(list_types)
+    print("!!! OK")
+
+
+def read_ply(filename):
+    """Read data from a PLY file."""
+    with contextlib.ExitStack() as stack:
+        if isinstance(filename, str):
+            f = stack.push(open(filename, "rb"))
+        else:
+            # If filename it's not a sting it's assumed to be a
+            # file-like object.
+            f = filename
+        _read_ply_handle(f)
+
+
 def cube():
     v = [[x, y, z] for x in [0.0, 1] for y in [0, 1] for z in [0, 1]]
     f = [
@@ -317,6 +432,7 @@ def _main():
     write_ply(buf, v, f, comments="test", binary=False)
     write_ply("a.ply", v, f, comments="test", binary=True)
     print(buf.getvalue().decode("ascii"), end="")
+    read_ply("a.ply")
 
 
 if __name__ == "__main__":
