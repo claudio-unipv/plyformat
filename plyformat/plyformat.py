@@ -6,11 +6,7 @@ import collections
 
 
 __doc__ = """Read/write PLY files."""
-
-
-__all__ = [
-    "write_ply"
-]
+__all__ = ["PLYError", "read_ply", "write_ply"]
 
 
 # Format specifications from:
@@ -48,6 +44,91 @@ __all__ = [
 class PLYError(RuntimeError):
     """Error reading or writing a PLY file."""
     pass
+
+
+def read_ply(filename):
+    """Read data from a PLY file."""
+    with contextlib.ExitStack() as stack:
+        if isinstance(filename, str):
+            f = stack.push(open(filename, "rb"))
+        else:
+            # If filename it's not a sting it's assumed to be a
+            # file-like object.
+            f = filename
+        elements = _read_ply_handle(f)
+    # Rearrange the elements.
+    if "vertex" in elements:
+        vertex = elements.pop("vertex")
+    else:
+        vertex = np.empty((0,), dtype=[("x", "f"), ("y", "f"), ("z", "f")])
+    if "face" in elements:
+        face = elements.pop("face")
+    else:
+        face = np.empty((0,), dtype=[("vertex_index", "O")])
+    return vertex, face, elements
+
+
+def write_ply(filename, vertices, faces, other_elements=None,
+              comments="", binary=False, big_endian=False):
+    """Write data to a PLY file.
+
+    Args:
+        filename (str or file): Name of the file, or or file-like object.
+        vertices (structured array): vertex data.
+        faces (structured array): face data.
+        other_elements (dict): named optional elements.
+        comments (str): comments.
+        binary (bool): use binary instead of ascii format.
+        big_endial (bool): big instead of little endian encoding.
+
+    Returns:
+        None
+
+    vertices, faces and the values in other_elements must be
+    structured arrays, with named fields.  List properties are
+    represented by fields of object type.
+
+    If vertices is given as a Nx3 array, it is converted to a
+    structured array with fields 'x', 'y' and 'z'.
+
+    If faces is given as a list of lists, it is converted to a
+    structured array with a single field of object type named
+    'vertex_index'.
+
+    other_elements may provide extra elements as a dictionary with
+    names as keys and structured arrays as values.
+
+    """
+    # Convert vertices to a structured array, if needed.
+    vertices = np.asarray(vertices)
+    if vertices.dtype.names is None:
+        # Names is None for regular unstructured arrays.
+        vertices = recfunctions.unstructured_to_structured(
+            vertices, names=["x", "y", "z"]
+        )
+    # Convert faces to a structured array, if needed.
+    if not isinstance(faces, np.ndarray) or faces.dtype.names is None:
+        # If not an array or not a structured one.
+        lst = list(map(list, faces))
+        faces = np.empty(len(lst), dtype=[("vertex_index", "O")])
+        faces["vertex_index"] = lst
+    # Build an ordered dict with all the elements.
+    elements = collections.OrderedDict()
+    elements["vertex"] = vertices
+    elements["face"] = faces
+    if other_elements is not None:
+        if "vertex" in other_elements or "face" in other_elements:
+            raise PLYError("Invalid element name")
+        elements.update(other_elements)
+    # Write the data.
+    with contextlib.ExitStack() as stack:
+        if isinstance(filename, str):
+            f = stack.push(open(filename, "wb"))
+        else:
+            # If filename it's not a sting it's assumed to be a
+            # file-like object.
+            f = filename
+        _write_ply_handle(f, elements, comments, binary, big_endian)
 
 
 # Numpy to PLY data types.
@@ -208,69 +289,6 @@ def _write_ply_handle(f, elements, comments, binary, big_endian):
             _write_ascii_element(f, arr)
 
 
-def write_ply(filename, vertices, faces, other_elements=None,
-              comments="", binary=False, big_endian=False):
-    """Write data to a PLY file.
-
-    Args:
-        filename (str or file): Name of the file, or or file-like object.
-        vertices (structured array): vertex data.
-        faces (structured array): face data.
-        other_elements (dict): named optional elements.
-        comments (str): comments.
-        binary (bool): use binary instead of ascii format.
-        big_endial (bool): big instead of little endian encoding.
-
-    Returns:
-        None
-
-    vertices, faces and the values in other_elements must be
-    structured arrays, with named fields.  List properties are
-    represented by fields of object type.
-
-    If vertices is given as a Nx3 array, it is converted to a
-    structured array with fields 'x', 'y' and 'z'.
-
-    If faces is given as a list of lists, it is converted to a
-    structured array with a single field of object type named
-    'vertex_index'.
-
-    other_elements may provide extra elements as a dictionary with
-    names as keys and structured arrays as values.
-
-    """
-    # Convert vertices to a structured array, if needed.
-    vertices = np.asarray(vertices)
-    if vertices.dtype.names is None:
-        # Names is None for regular unstructured arrays.
-        vertices = recfunctions.unstructured_to_structured(
-            vertices, names=["x", "y", "z"]
-        )
-    # Convert faces to a structured array, if needed.
-    if not isinstance(faces, np.ndarray) or faces.dtype.names is None:
-        # If not an array or not a structured one.
-        lst = list(map(list, faces))
-        faces = np.empty(len(lst), dtype=[("vertex_index", "O")])
-        faces["vertex_index"] = lst
-    # Build an ordered dict with all the elements.
-    elements = collections.OrderedDict()
-    elements["vertex"] = vertices
-    elements["face"] = faces
-    if other_elements is not None:
-        if "vertex" in other_elements or "face" in other_elements:
-            raise PLYError("Invalid element name")
-        elements.update(other_elements)
-    # Write the data.
-    with contextlib.ExitStack() as stack:
-        if isinstance(filename, str):
-            f = stack.push(open(filename, "wb"))
-        else:
-            # If filename it's not a sting it's assumed to be a
-            # file-like object.
-            f = filename
-        _write_ply_handle(f, elements, comments, binary, big_endian)
-
-
 def _read_header_line(f):
     """Read a line from the header, ignoring comments."""
     while True:
@@ -307,6 +325,7 @@ def _isvalidid(b):
 
 
 def _read_header_definitions(f):
+    """Read the definition of the elements."""
     name = None
     type_ = None
     size = None
@@ -318,12 +337,13 @@ def _read_header_definitions(f):
         tokens = line.split()
         if tokens[0] == b"property":
             if type_ is None:
-                raise PLYError(f"Invalid PLY file (unexpected property)")
-            if len(tokens) == 3 and tokens[1] in types and _isvalidid(tokens[2]):
-                # Store scalar type.
+                raise PLYError("Invalid PLY file (unexpected property)")
+            elif len(tokens) == 3 and tokens[1] in types and _isvalidid(tokens[2]):
+                # Store a scalar property.
                 type_.append((tokens[2].decode("ascii"), types[tokens[1]]))
             elif (len(tokens) == 5 and tokens[1] == b"list" and
                   tokens[2] in types and tokens[3] in types and _isvalidid(tokens[4])):
+                # Store a list property.
                 propname = tokens[4].decode("ascii")
                 type_.append((propname, np.object_))
                 list_types[name][propname] = (types[tokens[2]], types[tokens[3]])
@@ -354,7 +374,46 @@ def _read_ply_element_binary(f, element, list_types, big_endian):
 
 
 def _read_ply_element_ascii(f, element, list_types):
-    pass
+    """Read an element from f using the ASCII format."""
+    n = element.shape[0]
+    if element.dtype.hasobject:
+        # When there are list properties data is read line by line.
+        for k in range(n):
+            line = f.readline()
+            if line is None:
+                raise PLYError("PLY Error: unexpected EOF")
+            tokens = line.split()
+            data = []
+            index = 0
+            for j in range(len(element.dtype)):
+                if index >= len(tokens):
+                    raise PLYError("PLY Error: invalid data line")
+                if np.issubdtype(element.dtype[j], object):
+                    # Build the list.
+                    count = int(tokens[index])
+                    index += 1
+                    type_ = list_types[element.dtype.names[j]][1]
+                    lst = [type_(x) for x in tokens[index:index + count]]
+                    if len(lst) < count:
+                        raise PLYError("PLY Error: invalid list")
+                    index += count
+                    data.append(lst)
+                else:
+                    # Convert and append the scalar property.
+                    data.append(element.dtype[j].type(tokens[index]))
+                    index += 1
+            element[k] = data
+    else:
+        # Fast path for numerical-only elements.
+        k = 0
+        while k < n:
+            # Read in chunks to avoid doubling memory usage.
+            lines = min(n - k, 128)
+            arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
+            if arr.shape[0] < lines:
+                raise PLYError("PLY Error: unexpected EOF")
+            element[k:k + lines] = arr
+            k += lines
 
 
 def _read_ply_handle(f):
@@ -367,21 +426,7 @@ def _read_ply_handle(f):
             _read_ply_element_binary(f, element, list_types[name], big_endian)
         else:
             _read_ply_element_ascii(f, element, list_types[name])
-    print(elements)
-    print(list_types)
-    print("!!! OK")
-
-
-def read_ply(filename):
-    """Read data from a PLY file."""
-    with contextlib.ExitStack() as stack:
-        if isinstance(filename, str):
-            f = stack.push(open(filename, "rb"))
-        else:
-            # If filename it's not a sting it's assumed to be a
-            # file-like object.
-            f = filename
-        _read_ply_handle(f)
+    return elements
 
 
 def cube():
@@ -430,7 +475,7 @@ def _main():
     v, f = prism(10)
     buf = io.BytesIO()
     write_ply(buf, v, f, comments="test", binary=False)
-    write_ply("a.ply", v, f, comments="test", binary=True)
+    write_ply("a.ply", v, f, comments="test", binary=False)
     print(buf.getvalue().decode("ascii"), end="")
     read_ply("a.ply")
 
