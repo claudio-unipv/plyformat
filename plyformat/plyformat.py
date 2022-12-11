@@ -60,6 +60,18 @@ _TYPE_MAP = [
 ]
 
 
+_STRUCT_MAP = {
+    b"double": "d",
+    b"float": "f",
+    b"uchar": "B",
+    b"char": "b",
+    b"ushort": "H",
+    b"short": "h",
+    b"uint": "I",
+    b"int": "i"
+}
+
+
 def _ply_type(dtype):
     """Return the corresponding PLY type, or None."""
     for dt, typename in _TYPE_MAP:
@@ -120,13 +132,41 @@ def _write_ascii_element(f, arr):
         np.savetxt(f, arr, fmt="%g")
 
 
-def _write_binary_element(f, data, big_endian):
-    
+def _write_binary_element(f, arr, big_endian):
+    fmt = [(">" if big_endian else "<")]
+    islist = []
+    for field in arr.dtype.fields.items():
+        if np.issubdtype(field[1][0], np.object_):
+            lt, it = _list_types(arr[field[0]])
+            fmt.append(_STRUCT_MAP[lt])
+            fmt.append(" {:d}" + _STRUCT_MAP[it])
+            islist.append(True)
+        else:
+            fmt.append(_STRUCT_MAP[_ply_type(field[1][0])])
+            islist.append(False)
+    fmt = "".join(fmt)
+    if arr.dtype.hasobject:
+        for row in arr:
+            ls = []
+            data = []
+            for x, xlist in zip(row, islist):
+                if xlist:
+                    ls.append(len(x))
+                    data.append(len(x))
+                    data.extend(x)
+                else:
+                    data.append(x)
+            print("!!!", fmt.format(*ls), *data)
+            f.write(struct.pack(fmt.format(*ls), *data))
+    else:
+        for row in arr:
+            print("===", fmt, *row)
+            f.write(struct.pack(fmt, *row))
 
 
 def _write_ply_handle(f, elements, comments, binary, big_endian):
     f.write(b"ply\n")
-    if ascii:
+    if not binary:
         f.write(b"format ascii 1.0\n")
     elif big_endian:
         f.write(b"format binary_big_endian 1.0\n")
@@ -175,10 +215,10 @@ def write_ply(filename, vertices, faces, other_elements=None,
 
 
 def cube():
-    v = [[x, y, z] for x in [0, 1] for y in [0, 1] for z in [0, 1]]
+    v = [[x, y, z] for x in [0.0, 1] for y in [0, 1] for z in [0, 1]]
     f = [
-        [0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4],
-        [2, 3, 6, 7], [0, 2, 6, 4], [1, 3, 7, 5]
+        [0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1],
+        [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]
     ]
     return v, f
 
@@ -193,8 +233,8 @@ def rgb_cube():
     v["red"] = 255
     v["green"] = 128
     f = [
-        [0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4],
-        [2, 3, 6, 7], [0, 2, 6, 4], [1, 3, 7, 5]
+        [0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1],
+        [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]
     ]
     return v, f
 
@@ -203,7 +243,8 @@ def _main():
     import io
     v, f = cube()
     buf = io.BytesIO()
-    write_ply(buf, v, f, comments="test")
+    write_ply(buf, v, f, comments="test", binary=False)
+    write_ply("a.ply", v, f, comments="test", binary=True)
     print(buf.getvalue().decode("ascii"), end="")
 
 
