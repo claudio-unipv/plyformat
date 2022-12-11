@@ -1,10 +1,14 @@
 import numpy as np
 from numpy.lib import recfunctions
 import struct
+import contextlib
 import collections
 
 
-# Specifications from:
+__doc__ = """Read/write PLY files."""
+
+
+# Format specifications from:
 #
 #   http://paulbourke.net/dataformats/ply/
 #
@@ -17,6 +21,17 @@ import collections
 # faces should have at least the "vertex_index" list property.
 #
 # This module uses numpy structured arrays to represent elements.
+# Field names and types corresponds to names and types of properties.
+# An array with a field with object type is supposed to contain lists,
+# and corresponds to a property list.
+#
+# As an exception, the "vertex" element can be represented as a Nx3
+# array with the default properties named "x", "y" and "z".
+#
+# A second exception is the "face" element, that can be represented as
+# a list of lists, and that will interpreted as having the single list
+# property "vertex_index".
+
 
 # TODO:
 # - write binary
@@ -27,6 +42,7 @@ import collections
 
 
 class PLYError(RuntimeError):
+    """Error reading or writing a PLY file."""
     pass
 
 
@@ -45,6 +61,7 @@ _TYPE_MAP = [
 
 
 def _ply_type(dtype):
+    """Return the corresponding PLY type, or None."""
     for dt, typename in _TYPE_MAP:
         if np.issubdtype(dtype, dt):
             return typename
@@ -52,6 +69,7 @@ def _ply_type(dtype):
 
 
 def _list_types(arr):
+    """Determine the types for the Length and the items of a property list."""
     n = max((len(x) for x in arr), default=0)
     if n < 256:
         len_type = b"uchar"
@@ -84,20 +102,17 @@ def _write_properties(f, arr):
 def _write_ascii_element(f, arr):
     if arr.dtype.hasobject:
         # Lists need to be special cased.
-        lists = set(i for i, f in enumerate(arr.dtype.fields.items())
-                    if np.issubdtype(f[1][0], np.object_))
-        n = arr.shape[0]
-        for i in range(n):
-            row = list(arr[i])
+        islist = [np.issubdtype(f[0], np.object_) for f in arr.dtype.fields.values()]
+        for i in range(arr.shape[0]):
             data = []
-            for j, x in enumerate(row):
-                if j in lists:
+            for x, xlist in zip(arr[i], islist):
+                if xlist:
                     # Lists are encoded as (length, item[0], item[1], ...).
                     data.append(str(len(x)))
                     data.extend(map(str, x))
                 else:
                     # Regular elements are just added to the output.
-                    data.append(str(x))
+                    data.append(np.str_(x))
             f.write((" ".join(data)).encode("ascii"))
             f.write(b"\n")
     else:
@@ -106,7 +121,7 @@ def _write_ascii_element(f, arr):
 
 
 def _write_binary_element(f, data, big_endian):
-    pass
+    
 
 
 def _write_ply_handle(f, elements, comments, binary, big_endian):
@@ -134,17 +149,16 @@ def write_ply(filename, vertices, faces, other_elements=None,
               comments="", binary=False, big_endian=False):
     """Write data to a PLY file."""
     vertices = np.asarray(vertices)
-    if vertices.dtype.fields is None:
+    if vertices.dtype.names is None:
+        # Names is None for regular unstructured arrays.
         vertices = recfunctions.unstructured_to_structured(
             vertices, names=["x", "y", "z"]
         )
-    if not isinstance(faces, np.ndarray) or faces.dtype.fields is None:
-        temp = np.empty(len(faces), dtype=[("vertex_index", "O")])
-        for i, face in enumerate(faces):
-            temp[i] = list(face)
-        faces = temp
-    else:
-        faces = np.asarray(faces)
+    if not isinstance(faces, np.ndarray) or faces.dtype.names is None:
+        # If not an array or not a structured one.
+        lst = list(map(list, faces))
+        faces = np.empty(len(lst), dtype=[("vertex_index", "O")])
+        faces["vertex_index"] = lst
     elements = collections.OrderedDict()
     elements["vertex"] = vertices
     elements["face"] = faces
@@ -152,11 +166,12 @@ def write_ply(filename, vertices, faces, other_elements=None,
         if "vertex" in other_elements or "face" in other_elements:
             raise PLYError("Invalid element name")
         elements.update(other_elements)
-    if isinstance(filename, str):
-        with open(filename, "wb") as f:
-            _write_ply_handle(f, elements, comments, binary, big_endian)
-    else:
-        _write_ply_handle(filename, elements, comments, binary, big_endian)
+    with contextlib.ExitStack() as stack:
+        if isinstance(filename, str):
+            f = stack.push(open(filename, "wb"))
+        else:
+            f = filename
+        _write_ply_handle(f, elements, comments, binary, big_endian)
 
 
 def cube():
@@ -189,7 +204,7 @@ def _main():
     v, f = cube()
     buf = io.BytesIO()
     write_ply(buf, v, f, comments="test")
-    print(buf.getvalue().decode("ascii"))
+    print(buf.getvalue().decode("ascii"), end="")
 
 
 if __name__ == "__main__":
