@@ -35,10 +35,9 @@ __all__ = ["PLYError", "read_ply", "write_ply"]
 
 
 # TODO:
-# - read ascii
-# - read binary
 # - test
 # - setup
+# - catch errors due to ill-formed input files
 
 
 class PLYError(RuntimeError):
@@ -47,7 +46,16 @@ class PLYError(RuntimeError):
 
 
 def read_ply(filename):
-    """Read data from a PLY file."""
+    """Read data from a PLY file.
+
+    Args:
+        filename (str or file): Name of the file, or or file-like object.
+
+    Returns:
+        vertices (structured array): vertex data.
+        faces (structured array): face data.
+        other_elements (dict): named optional elements.
+    """
     with contextlib.ExitStack() as stack:
         if isinstance(filename, str):
             f = stack.push(open(filename, "rb"))
@@ -132,7 +140,7 @@ def write_ply(filename, vertices, faces, other_elements=None,
 
 
 # Numpy to PLY data types.
-_TYPE_MAP = [
+_NP2PLY_MAP = [
     (np.float64, b"double"),
     (np.float32, b"float"),
     (np.uint8, b"uchar"),
@@ -145,7 +153,7 @@ _TYPE_MAP = [
 
 
 # PLY data type to struct format characters.
-_STRUCT_MAP = {
+_PLY2STRUCT_MAP = {
     b"double": "d",
     b"float": "f",
     b"uchar": "B",
@@ -157,13 +165,26 @@ _STRUCT_MAP = {
 }
 
 
+# PLY data type to struct format characters.
+_NP2STRUCT_MAP = {
+    np.float64: "d",
+    np.float32: "f",
+    np.uint8: "B",
+    np.int8: "b",
+    np.uint16: "H",
+    np.int16: "h",
+    np.uint32: "I",
+    np.int32: "i"
+}
+
+
 def _ply_type(dtype):
     """Return the corresponding PLY type, or None."""
     if np.issubdtype(dtype, np.int64):
         dtype = np.int32
     elif np.issubdtype(dtype, np.uint64):
         dtype = np.uint32
-    for dt, typename in _TYPE_MAP:
+    for dt, typename in _NP2PLY_MAP:
         if np.issubdtype(dtype, dt):
             return typename
     return None
@@ -238,11 +259,11 @@ def _write_binary_element(f, arr, big_endian):
             # Object fields are intepreted as property lists, and
             # requires the output of the length and the items.
             lt, it = _list_types(arr[field[0]])
-            fmt.append(_STRUCT_MAP[lt])
-            fmt.append(" {:d}" + _STRUCT_MAP[it])
+            fmt.append(_PLY2STRUCT_MAP[lt])
+            fmt.append(" {:d}" + _PLY2STRUCT_MAP[it])
             islist.append(True)
         else:
-            fmt.append(_STRUCT_MAP[_ply_type(field[1][0])])
+            fmt.append(_PLY2STRUCT_MAP[_ply_type(field[1][0])])
             islist.append(False)
     fmt = "".join(fmt)
     # Write the data.
@@ -331,7 +352,7 @@ def _read_header_definitions(f):
     size = None
     elements = collections.OrderedDict()
     list_types = {}
-    types = {ply: dt for dt, ply in _TYPE_MAP}
+    types = {ply: dt for dt, ply in _NP2PLY_MAP}
     while True:
         line = _read_header_line(f)
         tokens = line.split()
@@ -348,7 +369,6 @@ def _read_header_definitions(f):
                 type_.append((propname, np.object_))
                 list_types[name][propname] = (types[tokens[2]], types[tokens[3]])
             else:
-                breakpoint()
                 raise PLYError(f"Invalid PLY file (invalid element '{line}')")
             continue
         if name is not None:
@@ -370,50 +390,88 @@ def _read_header_definitions(f):
 
 
 def _read_ply_element_binary(f, element, list_types, big_endian):
-    pass
+    """Read an element from f using the binary format."""
+    # 1) Build struct format strings corresponding to the data.
+    # Strings for regular and list properties are interleaved.  This
+    # is because the length of lists is known only after the
+    # corresponding counter has been read.
+    end = (">" if big_endian else "<")
+    fmts = []
+    fmt = []
+    for j in range(len(element.dtype)):
+        if np.issubdtype(element.dtype[j], np.object_):
+            # List property: add the counter to the current format
+            # string.  Then add a new string for the list items.  Then
+            # start a new format string.
+            lt, it = list_types[element.dtype.names[j]]
+            fmt.append(_NP2STRUCT_MAP[lt])
+            fmts.append(end + "".join(fmt))
+            fmts.append(end + "{:d}" + _NP2STRUCT_MAP[it])
+            fmt = []
+        else:
+            fmt.append(_NP2STRUCT_MAP[element.dtype[j].type])
+    if fmt:
+        fmts.append(end + "".join(fmt))
+    # 2) Compute the size for each format string.  Use -1 to mark list items.
+    sizes = [struct.calcsize(s) if i % 2 == 0 else -1 for i, s in enumerate(fmts)]
+    # 3) Read the data.
+    for i in range(element.shape[0]):
+        row = []
+        for fmt, sz in zip(fmts, sizes):
+            if sz < 0:
+                fmt = fmt.format(row[-1])
+                sz = struct.calcsize(fmt)
+                bytes_ = f.read(sz)
+                row[-1] = list(struct.unpack(fmt, bytes_))
+            else:
+                row.extend(struct.unpack(fmt, f.read(sz)))
+        element[i] = tuple(row)
+
+
+def _read_numerical_ply_element_ascii(f, element):
+    """Read an element without list properties from f using the ASCII format."""
+    n = element.shape[0]
+    k = 0
+    while k < n:
+        # Read in chunks to avoid doubling memory usage.
+        lines = min(n - k, 128)
+        arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
+        if arr.shape[0] < lines:
+            raise PLYError("PLY Error: unexpected EOF")
+        element[k:k + lines] = arr
+        k += lines
 
 
 def _read_ply_element_ascii(f, element, list_types):
     """Read an element from f using the ASCII format."""
-    n = element.shape[0]
-    if element.dtype.hasobject:
-        # When there are list properties data is read line by line.
-        for k in range(n):
-            line = f.readline()
-            if line is None:
-                raise PLYError("PLY Error: unexpected EOF")
-            tokens = line.split()
-            data = []
-            index = 0
-            for j in range(len(element.dtype)):
-                if index >= len(tokens):
-                    raise PLYError("PLY Error: invalid data line")
-                if np.issubdtype(element.dtype[j], object):
-                    # Build the list.
-                    count = int(tokens[index])
-                    index += 1
-                    type_ = list_types[element.dtype.names[j]][1]
-                    lst = [type_(x) for x in tokens[index:index + count]]
-                    if len(lst) < count:
-                        raise PLYError("PLY Error: invalid list")
-                    index += count
-                    data.append(lst)
-                else:
-                    # Convert and append the scalar property.
-                    data.append(element.dtype[j].type(tokens[index]))
-                    index += 1
-            element[k] = data
-    else:
+    if not element.dtype.hasobject:
         # Fast path for numerical-only elements.
-        k = 0
-        while k < n:
-            # Read in chunks to avoid doubling memory usage.
-            lines = min(n - k, 128)
-            arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
-            if arr.shape[0] < lines:
-                raise PLYError("PLY Error: unexpected EOF")
-            element[k:k + lines] = arr
-            k += lines
+        return _read_numerical_ply_element_ascii(f, element)
+    for k in range(element.shape[0]):
+        line = f.readline()
+        if line is None:
+            raise PLYError("PLY Error: unexpected EOF")
+        tokens = line.split()
+        data = []
+        index = 0
+        for j in range(len(element.dtype)):
+            if index >= len(tokens):
+                raise PLYError("PLY Error: invalid data line")
+            if np.issubdtype(element.dtype[j], object):
+                # Build the list.
+                count = int(tokens[index])
+                index += 1
+                type_ = list_types[element.dtype.names[j]][1]
+                lst = [type_(x) for x in tokens[index:index + count]]
+                if len(lst) < count:
+                    raise PLYError("PLY Error: invalid list")
+                index += count
+                data.append(lst)
+            else:
+                # Convert and append the scalar property.
+                data.append(element.dtype[j].type(tokens[index]))
+                index += 1
+        element[k] = data
 
 
 def _read_ply_handle(f):
@@ -476,8 +534,9 @@ def _main():
     buf = io.BytesIO()
     write_ply(buf, v, f, comments="test", binary=False)
     write_ply("a.ply", v, f, comments="test", binary=False)
-    print(buf.getvalue().decode("ascii"), end="")
-    read_ply("a.ply")
+    write_ply("b.ply", v, f, comments="test", binary=True)
+    # print(buf.getvalue().decode("ascii"), end="")
+    v1, f1, _ = read_ply("b.ply")
 
 
 if __name__ == "__main__":
