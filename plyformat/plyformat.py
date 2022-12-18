@@ -436,6 +436,7 @@ def _read_numerical_ply_element_ascii(f, element):
         # Read in chunks to avoid doubling memory usage.
         lines = min(n - k, 128)
         arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
+        arr = np.atleast_1d(arr)  # Otherwise collapses for n == 1.
         if arr.shape[0] < lines:
             raise PLYError("PLY Error: unexpected EOF")
         element[k:k + lines] = arr
@@ -471,7 +472,9 @@ def _read_ply_element_ascii(f, element, list_types):
                 # Convert and append the scalar property.
                 data.append(element.dtype[j].type(tokens[index]))
                 index += 1
-        element[k] = data
+        if index != len(tokens):
+            raise PLYError("PLY Error: invalid data line")
+        element[k] = tuple(data)
 
 
 def _read_ply_handle(f):
