@@ -1,0 +1,19 @@
+ply
+format ascii 1.0
+comment test all PLY types
+element vertex 1
+property float x
+property double y
+property float z
+property uchar p1
+property char p2
+property short p3
+property ushort p4
+property int p5
+property uint p6
+element face 1
+property list uchar int vertex_index
+property list int ushort other_index
+end_header
+-1.25 -2.5 -3.75 1 2 3 4 5 6
+3 0 0 0 4 1 2 3 4
