@@ -381,7 +381,10 @@ def _read_header_definitions(f):
                 raise PLYError(f"Invalid PLY file (invalid element '{line}')")
             name = tokens[1].decode("ascii")
             type_ = []
-            size = int(tokens[2])
+            try:
+                size = int(tokens[2])
+            except ValueError:
+                raise PLYError(str(e))
             list_types[name] = {}
         else:
             line = line.decode("ascii")
@@ -422,9 +425,16 @@ def _read_ply_element_binary(f, element, list_types, big_endian):
                 fmt = fmt.format(row[-1])
                 sz = struct.calcsize(fmt)
                 bytes_ = f.read(sz)
-                row[-1] = list(struct.unpack(fmt, bytes_))
+                try:
+                    row[-1] = list(struct.unpack(fmt, bytes_))
+                except struct.error as e:
+                    raise PLYError(str(e))
             else:
-                row.extend(struct.unpack(fmt, f.read(sz)))
+                bytes_ = f.read(sz)
+                try:
+                    row.extend(struct.unpack(fmt, bytes_))
+                except struct.error as e:
+                    raise PLYError(str(e))
         element[i] = tuple(row)
 
 
@@ -435,7 +445,10 @@ def _read_numerical_ply_element_ascii(f, element):
     while k < n:
         # Read in chunks to avoid doubling memory usage.
         lines = min(n - k, 128)
-        arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
+        try:
+            arr = np.genfromtxt(f, dtype=element.dtype, max_rows=lines)
+        except ValueError as e:
+            raise PLYError(str(e))
         arr = np.atleast_1d(arr)  # Otherwise collapses for n == 1.
         if arr.shape[0] < lines:
             raise PLYError("PLY Error: unexpected EOF")
@@ -460,10 +473,16 @@ def _read_ply_element_ascii(f, element, list_types):
                 raise PLYError("PLY Error: invalid data line")
             if np.issubdtype(element.dtype[j], object):
                 # Build the list.
-                count = int(tokens[index])
+                try:
+                    count = int(tokens[index])
+                except ValueError as e:
+                    raise PLYError(str(e))
                 index += 1
                 type_ = list_types[element.dtype.names[j]][1]
-                lst = [type_(x) for x in tokens[index:index + count]]
+                try:
+                    lst = [type_(x) for x in tokens[index:index + count]]
+                except ValueError as e:
+                    raise PLYError(str(e))
                 if len(lst) < count:
                     raise PLYError("PLY Error: invalid list")
                 index += count
@@ -487,4 +506,9 @@ def _read_ply_handle(f):
             _read_ply_element_binary(f, element, list_types[name], big_endian)
         else:
             _read_ply_element_ascii(f, element, list_types[name])
+    extra = f.read()
+    if not binary:
+        extra = extra.decode("ascii").strip()
+    if len(extra) > 0:
+        raise PLYError("Extra data in file")
     return elements
