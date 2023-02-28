@@ -6,7 +6,7 @@ import collections
 
 
 __doc__ = """Read/write PLY files."""
-__all__ = ["PLYError", "read_ply", "write_ply"]
+__all__ = ["PLYError", "read_ply", "write_ply", "geometry_from_range"]
 
 
 # Format specifications from:
@@ -512,3 +512,48 @@ def _read_ply_handle(f):
     if len(extra) > 0:
         raise PLYError("Extra data in file")
     return elements
+
+
+def geometry_from_range(x, y, z, valid, rgb=None):
+    """Create vertices and faces from range data.
+
+    Args:
+        x (array): bidimensional array with x coordinates.
+        y (array): bidimensional array with y coordinates.
+        z (array): bidimensional array with z coordinates.
+        valid (array): bidimensional logic array marking valid points.
+        rgb (array or None): optional color images.
+
+    Returns:
+        vertices (structured array): vertex data.
+        faces (structured array): face data.
+
+    All arrays must have the same number of rows and columns.
+    If given, the image must have three color channels.
+    """
+    # Faces.
+    allv = valid[:-1, :] & valid[1:, :]
+    allv = allv[:, :-1] & allv[:, 1:]
+    # allv = np.concatenate([allv, np.zeros_like(allv[-1:, :])], 0)
+    # allv = np.concatenate([allv, np.zeros_like(allv[:, -1:])], 1)
+    idx = valid.reshape(-1).cumsum().reshape(valid.shape) - 1
+    faces = []
+    for i in range(allv.shape[0]):
+        for j in range(allv.shape[1]):
+            if allv[i, j]:
+                faces.append([idx[i, j], idx[i + 1, j], idx[i, j + 1]])
+                faces.append([idx[i, j + 1], idx[i + 1, j], idx[i + 1, j + 1]])
+    # Vertices
+    valid = valid.reshape(-1)
+    dt = [("x", x.dtype), ("y", y.dtype), ("z", z.dtype)]
+    if rgb is not None:
+        dt.extend([("red", rgb.dtype), ("green", rgb.dtype), ("blue", rgb.dtype)])
+    v = np.empty(valid[valid].size, dtype=dt)
+    v["x"] = x.reshape(-1)[valid]
+    v["y"] = y.reshape(-1)[valid]
+    v["z"] = z.reshape(-1)[valid]
+    if rgb is not None:
+        v["red"] = rgb[:, :, 0].reshape(-1)[valid]
+        v["green"] = rgb[:, :, 1].reshape(-1)[valid]
+        v["blue"] = rgb[:, :, 2].reshape(-1)[valid]
+    return v, faces
